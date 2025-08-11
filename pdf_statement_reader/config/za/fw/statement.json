@@ -1,0 +1,36 @@
+{
+    "$schema": "https://raw.githubusercontent.com/marlanperumal/pdf_statement_reader/develop/pdf_statement_reader/config/psr_config.schema.json",
+    "layout": {
+        "default": {
+            "area": [200, 50, 700, 550],
+            "columns": [150, 250, 350, 400, 550]
+        },
+        "first": {
+            "area": [200, 50, 700, 550],
+            "columns": [150, 250, 350, 400, 550]
+        }
+    },
+    "columns": {
+        "trans_date": "Date",
+        "trans_type": "Details",
+        "trans_detail": "Service Fee",
+        "debit": "Debits",
+        "credit": "Credits",
+        "balance": "Balance"
+    },
+    "order": [
+        "trans_date",
+        "trans_type",
+        "trans_detail",
+        "debit",
+        "credit",
+        "balance"
+    ],
+    "cleaning": {
+        "numeric": ["debit", "credit", "balance"],
+        "date": ["trans_date"],
+        "date_format": "%m %d",
+        "trans_detail": "below",
+        "dropna": ["balance"]
+    }
+}

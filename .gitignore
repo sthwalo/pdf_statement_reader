@@ -111,3 +111,15 @@ venv.bak/
 *.ipynb
 
 !pdf_statement_reader/config/**/*.json
+
+# directories to ignore
+backup/
+output/
+results/
+analysis_results/
+data/ 
+/backup
+/backup/*
+backup.zip
+output/
+
