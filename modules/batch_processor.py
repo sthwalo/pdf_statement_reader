@@ -460,8 +460,15 @@ def main():
         # Print summary
         print(f"\nBatch processing complete: {result['success_count']}/{result['pdf_count']} PDFs processed successfully")
         
+        # Display individual transaction files
+        if result['results']:
+            print("\nIndividual transaction files:")
+            for res in result['results']:
+                if res['success']:
+                    print(f"  - {res['output_path']}")
+        
         if args.combine and result['combined_path']:
-            print(f"Combined transactions saved to: {result['combined_path']}")
+            print(f"\nCombined transactions saved to: {result['combined_path']}")
         
         if args.debug:
             print(f"Debug logs saved to: {os.path.join(args.output, 'debug')}")
