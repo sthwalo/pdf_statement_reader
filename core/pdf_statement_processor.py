@@ -488,8 +488,11 @@ def menu_batch_process():
     pattern = input("Filter PDFs by filename pattern (leave empty for all PDFs): ").strip()
     
     # Build command arguments
-    batch_script_path = os.path.join(os.path.dirname(__file__), 'batch_process_final.py')
-    cmd = [sys.executable, batch_script_path, input_dir, '--output-dir', output_dir]
+    batch_script_path = os.path.join(os.path.dirname(__file__), '../modules/batch_processor.py')
+    cmd = [sys.executable, batch_script_path, '--input', input_dir, '--output', output_dir]
+    
+    # Add extraction method
+    cmd.extend(['--method', extraction_method])
     
     if debug:
         cmd.append('--debug')
@@ -499,6 +502,9 @@ def menu_batch_process():
         cmd.append('--analyze')
     if pattern:
         cmd.extend(['--pattern', pattern])
+    
+    # Set number of workers
+    cmd.extend(['--workers', str(max_workers)])
     
     print("\nProcessing PDF files...")
     logger.info(f"Running batch processing with command: {' '.join(cmd)}")
@@ -517,8 +523,12 @@ def menu_batch_process():
                 print("\nNo PDF files found in the specified directory. Please check the path and try again.")
                 return
                 
-            # Check for combined CSV
-            combined_csv = os.path.join(output_dir, "combined_transactions.csv")
+            # Check for combined CSV - use camelot directory if camelot extraction was used
+            if extraction_method == 'camelot':
+                combined_csv = os.path.join(output_dir, "camelot", "combined_transactions.csv")
+            else:
+                combined_csv = os.path.join(output_dir, "combined_transactions.csv")
+                
             if combine and os.path.exists(combined_csv):
                 print(f"\n✅ Combined CSV saved to: {combined_csv}")
                 
