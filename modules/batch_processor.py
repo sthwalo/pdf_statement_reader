@@ -354,10 +354,17 @@ def process_directory(input_dir, output_dir, password=None, max_workers=None, co
         
         # Set appropriate output directory for combined file
         if is_camelot_extraction:
-            # For camelot, use the output/camelot directory
-            camelot_output_dir = os.path.join(os.path.dirname(output_dir), 'output', 'camelot')
-            os.makedirs(camelot_output_dir, exist_ok=True)
-            combined_path = os.path.join(camelot_output_dir, "combined_transactions.csv")
+            # For camelot, use the same directory as the individual files
+            # Get the directory of the first successful output file
+            if successful_outputs and len(successful_outputs) > 0:
+                first_output = successful_outputs[0]
+                camelot_output_dir = os.path.dirname(first_output)
+                combined_path = os.path.join(camelot_output_dir, "combined_transactions.csv")
+            else:
+                # Fallback to data/output/camelot
+                camelot_output_dir = os.path.join('data', 'output', 'camelot')
+                os.makedirs(camelot_output_dir, exist_ok=True)
+                combined_path = os.path.join(camelot_output_dir, "combined_transactions.csv")
         else:
             # For other methods, use the specified output directory
             combined_path = os.path.join(output_dir, "combined_transactions.csv")
