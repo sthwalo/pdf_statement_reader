@@ -551,10 +551,20 @@ def main():
     # Set default output path if not specified
     if not args.output:
         pdf_basename = os.path.basename(args.pdf_path)
-        output_dir = os.path.join(os.path.dirname(args.pdf_path), '../output')
+        # Use dedicated output directory for camelot
+        output_dir = os.path.join(os.path.dirname(args.pdf_path), '../output/camelot')
         os.makedirs(output_dir, exist_ok=True)
         pdf_name = os.path.splitext(pdf_basename)[0]
-        args.output = os.path.join(output_dir, f"{pdf_name}_camelot_transactions.csv")
+        args.output = os.path.join(output_dir, f"{pdf_name}_transactions.csv")
+    else:
+        # If output is a directory, create a file in the camelot subdirectory
+        if os.path.isdir(args.output):
+            pdf_basename = os.path.basename(args.pdf_path)
+            pdf_name = os.path.splitext(pdf_basename)[0]
+            # Create camelot subdirectory
+            camelot_output_dir = os.path.join(args.output, 'camelot')
+            os.makedirs(camelot_output_dir, exist_ok=True)
+            args.output = os.path.join(camelot_output_dir, f"{pdf_name}_transactions.csv")
     
     # Extract transactions using camelot
     extractor = CamelotBankStatementParser(debug=args.debug)
@@ -569,9 +579,16 @@ def main():
         logger.warning("❌ No transactions extracted")
         
     # Save debug info if requested
-    if args.debug_info:
-        with open(args.debug_info, 'w') as f:
-            json.dump(extractor.debug_info, f, indent=2)
+    if args.debug:
+        # Save debug info to the same directory as the output file
+        output_dir = os.path.dirname(args.output)
+        pdf_basename = os.path.basename(args.pdf_path)
+        pdf_name = os.path.splitext(pdf_basename)[0]
+        debug_file = os.path.join(output_dir, f"{pdf_name}_debug.json")
+        
+        with open(debug_file, 'w') as f:
+            json.dump(extractor.debug_info, f, indent=2, default=str)
+        logger.info(f"Saved debug info to {debug_file}")
             
     # Compare with other extraction methods if requested
     if args.compare:

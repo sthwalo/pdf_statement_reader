@@ -44,6 +44,9 @@ def save_to_csv(transactions, output_path, debug=False):
         # Convert to DataFrame
         df = pd.DataFrame(transactions)
         
+        # Check if this is camelot format (has Date as first column)
+        is_camelot_format = 'Date' in df.columns and set(['Details', 'Debits', 'Credits', 'Balance']).issubset(df.columns)
+        
         # Ensure all required columns are present
         for col in ['Details', 'ServiceFee', 'Debits', 'Credits', 'Date', 'Balance']:
             if col not in df.columns:
@@ -51,8 +54,14 @@ def save_to_csv(transactions, output_path, debug=False):
         
         debug_info['columns'] = list(df.columns)
         
-        # Reorder columns
-        df = df[['Details', 'ServiceFee', 'Debits', 'Credits', 'Date', 'Balance']]
+        # Reorder columns based on format
+        if is_camelot_format or 'camelot' in output_path:
+            # Use camelot column order
+            df = df[['Date', 'Details', 'Debits', 'Credits', 'Balance', 'ServiceFee']]
+            logger.info("Using camelot column order")
+        else:
+            # Use traditional column order
+            df = df[['Details', 'ServiceFee', 'Debits', 'Credits', 'Date', 'Balance']]
         
         # Save to CSV
         df.to_csv(output_path, index=False)
@@ -103,13 +112,24 @@ def combine_csv_files(csv_files, output_path, debug=False):
         
         # Read and combine all CSVs
         dfs = []
+        is_camelot_format = False
+        
         for csv_file in csv_files:
             try:
+                # Check if this is a camelot output file
+                if 'camelot' in csv_file or '/camelot/' in csv_file:
+                    is_camelot_format = True
+                
                 df = pd.read_csv(csv_file)
                 
                 # Add source filename as a column
                 filename = os.path.basename(csv_file)
                 df['Source'] = filename
+                
+                # For camelot files, ensure column order is preserved
+                if is_camelot_format and set(['Date', 'Details', 'Debits', 'Credits', 'Balance', 'ServiceFee']).issubset(df.columns):
+                    # This is a camelot format file, preserve the column order
+                    logger.info(f"Detected camelot format for {csv_file}")
                 
                 debug_info['file_counts'][csv_file] = len(df)
                 dfs.append(df)
@@ -138,9 +158,52 @@ def combine_csv_files(csv_files, output_path, debug=False):
         
         # Sort by date
         if 'Date' in combined_df.columns:
-            combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
-            combined_df = combined_df.sort_values('Date')
-            combined_df['Date'] = combined_df['Date'].dt.strftime('%Y-%m-%d')
+            # Handle partial dates (DD/MM) by adding current year
+            # First preserve original dates
+            combined_df['OriginalDate'] = combined_df['Date']
+            
+            # Add current year to dates for sorting purposes
+            current_year = pd.Timestamp.now().year
+            
+            # Convert DD/MM to DD/MM/YYYY format
+            def add_year_to_date(date_str):
+                if pd.isna(date_str) or not isinstance(date_str, str):
+                    return date_str
+                
+                # Check if it's in DD/MM format
+                if '/' in date_str and len(date_str.split('/')) == 2:
+                    return f"{date_str}/{current_year}"
+                return date_str
+            
+            # Apply the conversion
+            combined_df['DateWithYear'] = combined_df['Date'].apply(add_year_to_date)
+            
+            # Parse dates with year for sorting
+            combined_df['DateWithYear'] = pd.to_datetime(combined_df['DateWithYear'], 
+                                                       format='%d/%m/%Y', 
+                                                       errors='coerce')
+            
+            # Sort by the date with year
+            combined_df = combined_df.sort_values('DateWithYear')
+            
+            # Restore original date format
+            combined_df['Date'] = combined_df['OriginalDate']
+            
+            # Drop temporary columns
+            combined_df = combined_df.drop(['OriginalDate', 'DateWithYear'], axis=1)
+            
+        # Use camelot column order if detected
+        if is_camelot_format:
+            # Use camelot column order with Source at the end
+            column_order = ['Date', 'Details', 'Debits', 'Credits', 'Balance', 'ServiceFee', 'Source']
+            # Only include columns that exist in the dataframe
+            column_order = [col for col in column_order if col in combined_df.columns]
+            # Add any remaining columns
+            column_order += [col for col in combined_df.columns if col not in column_order]
+            combined_df = combined_df[column_order]
+        else:
+            # Use traditional column order
+            combined_df = combined_df[['Details', 'ServiceFee', 'Debits', 'Credits', 'Date', 'Balance', 'Source']]
         
         # Save combined CSV
         combined_df.to_csv(output_path, index=False)

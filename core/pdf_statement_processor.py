@@ -33,6 +33,7 @@ from modules.csv_exporter import save_to_csv, combine_csv_files
 from modules.csv_analyzer import analyze_csv_transactions, analyze_combined_csv
 from modules.analyze_pdf_structure import analyze_pdf_structure
 from modules.page_analyzer_menu import menu_analyze_pdf_pages
+from camelot_parser import CamelotBankStatementParser
 
 # Configure logging
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -118,7 +119,7 @@ def get_input_path(prompt, file_type=None):
             
         return path
 
-def process_single_pdf(pdf_path, output_dir, debug=False):
+def process_single_pdf(pdf_path, output_dir, debug=False, extraction_method='regular'):
     """
     Process a single PDF file through all stages
     
@@ -126,6 +127,7 @@ def process_single_pdf(pdf_path, output_dir, debug=False):
         pdf_path (str): Path to the PDF file
         output_dir (str): Output directory for results
         debug (bool): Enable debug mode
+        extraction_method (str): Extraction method to use ('regular', 'lattice', 'strict_lattice', 'camelot')
         
     Returns:
         bool: Success status
@@ -148,56 +150,102 @@ def process_single_pdf(pdf_path, output_dir, debug=False):
         
         logger.info(f"Processing {pdf_path}")
         
-        # Step 1: Extract tables from PDF
-        logger.info("Extracting tables from PDF...")
-        if debug:
-            tables, extract_debug = extract_tables_from_pdf(pdf_path, debug=True)
-            with open(os.path.join(debug_dir, f"{base_name}_table_extraction.json"), 'w') as f:
-                json.dump(extract_debug, f, indent=2, default=str)
-        else:
-            tables = extract_tables_from_pdf(pdf_path)
-            
-        if not tables:
-            logger.error(f"No tables found in {pdf_path}")
-            return False, None
-            
-        logger.info(f"Extracted {len(tables)} tables from PDF")
+        # Create output filename with extraction method
+        base_name = os.path.splitext(os.path.basename(pdf_path))[0]
         
-        # Step 2: Extract transactions from tables
-        logger.info("Extracting transactions from tables...")
-        if debug:
-            transactions, tx_debug = extract_transactions_from_pdf(tables, debug=True)
-            with open(os.path.join(debug_dir, f"{base_name}_transaction_extraction.json"), 'w') as f:
-                json.dump(tx_debug, f, indent=2, default=str)
+        # Use dedicated output directory for camelot extraction
+        if extraction_method == 'camelot':
+            camelot_output_dir = os.path.join(output_dir, 'camelot')
+            os.makedirs(camelot_output_dir, exist_ok=True)
+            output_csv = os.path.join(camelot_output_dir, f"{base_name}_transactions.csv")
         else:
-            transactions = extract_transactions_from_pdf(tables)
-            
-        if not transactions:
-            logger.error(f"No transactions extracted from {pdf_path}")
-            return False, None
-            
-        logger.info(f"Extracted {len(transactions)} transactions from tables")
+            output_csv = os.path.join(output_dir, f"{base_name}_{extraction_method}_transactions.csv")
         
-        # Step 3: Process transactions (clean, propagate dates, ensure balance columns)
-        logger.info("Processing transactions...")
-        if debug:
-            processed_transactions, proc_debug = process_transactions(
-                transactions, debug=True
-            )
-            with open(os.path.join(debug_dir, f"{base_name}_cleaning_debug.json"), 'w') as f:
-                json.dump(proc_debug, f, indent=2, default=str)
+        # Use camelot parser if selected
+        if extraction_method == 'camelot':
+            logger.info(f"Using camelot parser for {pdf_path}")
+            parser = CamelotBankStatementParser(debug=debug)
+            
+            if debug:
+                transactions = parser.extract_transactions_from_pdf(pdf_path, password=None)
+                with open(os.path.join(debug_dir, f"{base_name}_camelot_extraction.json"), 'w') as f:
+                    json.dump(parser.debug_info, f, indent=2, default=str)
+            else:
+                transactions = parser.extract_transactions_from_pdf(pdf_path, password=None)
                 
-            # Log balance column statistics
-            balance_count = sum(1 for tx in processed_transactions if tx.get('Balance'))
-            logger.info(f"Transactions with balance values: {balance_count}/{len(processed_transactions)} ({balance_count/len(processed_transactions)*100:.2f}%)")
-            logger.info(f"Balance columns found: {proc_debug.get('balance_columns_found', 0)}")
-            logger.info(f"Balance columns fixed: {proc_debug.get('balance_columns_fixed', 0)}")
-        else:
-            processed_transactions = process_transactions(transactions)
+            if not transactions:
+                logger.error(f"No transactions extracted from {pdf_path} using camelot parser")
+                return False, None
+                
+            logger.info(f"Extracted {len(transactions)} transactions using camelot parser")
             
+            # For camelot extraction, save directly to CSV to preserve format
+            logger.info(f"Saving camelot transactions directly to {output_csv}")
+            df = pd.DataFrame(transactions)
+            df.to_csv(output_csv, index=False)
+            
+            # Also save debug info to the camelot directory
+            if debug:
+                camelot_debug_dir = os.path.dirname(output_csv)
+                debug_file = os.path.join(camelot_debug_dir, f"{base_name}_debug.json")
+                with open(debug_file, 'w') as f:
+                    json.dump(parser.debug_info, f, indent=2, default=str)
+                logger.info(f"Saved debug info to {debug_file}")
+            
+            logger.info(f"Saved {len(transactions)} transactions to {output_csv}")
+            return True, output_csv
+            
+        else:
+            # Regular extraction pipeline
+            # Step 1: Extract tables from PDF
+            logger.info(f"Extracting tables from {pdf_path} using {extraction_method} method")
+            
+            if debug:
+                tables, extract_debug = extract_tables_from_pdf(pdf_path, None, method=extraction_method, debug=True)
+                with open(os.path.join(debug_dir, f"{base_name}_table_extraction.json"), 'w') as f:
+                    json.dump(extract_debug, f, indent=2, default=str)
+            else:
+                tables = extract_tables_from_pdf(pdf_path, None, method=extraction_method)
+            
+            if not tables:
+                logger.error(f"No tables found in {pdf_path}")
+                return False, None
+                
+            logger.info(f"Extracted {len(tables)} tables from PDF")
+            
+            # Step 2: Extract transactions from tables
+            logger.info("Extracting transactions from tables...")
+            
+            if debug:
+                transactions, tx_debug = extract_transactions_from_pdf(tables, debug=True)
+                with open(os.path.join(debug_dir, f"{base_name}_transaction_extraction.json"), 'w') as f:
+                    json.dump(tx_debug, f, indent=2, default=str)
+            else:
+                transactions = extract_transactions_from_pdf(tables)
+                
+            if not transactions:
+                logger.error(f"No transactions extracted from {pdf_path}")
+                return False, None
+                
+            logger.info(f"Extracted {len(transactions)} transactions from tables")
+            
+            # Step 3: Process transactions
+            logger.info("Processing transactions...")
+            
+            if debug:
+                processed_transactions, proc_debug = process_transactions(transactions, debug=True)
+                with open(os.path.join(debug_dir, f"{base_name}_transaction_processing.json"), 'w') as f:
+                    json.dump(proc_debug, f, indent=2, default=str)
+                logger.info(f"Transactions with balance values: {proc_debug.get('balance_columns_found', 0)}")
+                logger.info(f"Balance columns found: {proc_debug.get('balance_columns_found', 0)}")
+                logger.info(f"Balance columns fixed: {proc_debug.get('balance_columns_fixed', 0)}")
+            else:
+                processed_transactions = process_transactions(transactions)
+            
+            logger.info(f"Processed {len(processed_transactions)} transactions")
         logger.info(f"Processed {len(processed_transactions)} transactions")
         
-        # Step 4: Export to CSV
+        # Step 3: Export to CSV
         logger.info(f"Exporting to CSV: {output_csv}")
         save_to_csv(processed_transactions, output_csv)
         logger.info(f"Saved {len(processed_transactions)} transactions to {output_csv}")
@@ -209,7 +257,7 @@ def process_single_pdf(pdf_path, output_dir, debug=False):
         logger.error(f"Error processing {pdf_path}: {e}", exc_info=True)
         return False, None
 
-def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combine=False, analyze=False):
+def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combine=False, analyze=False, extraction_method='regular'):
     """
     Process all PDF files in the specified directory
     
@@ -220,6 +268,7 @@ def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combin
         debug (bool): Enable debug mode
         combine (bool): Combine all CSV files into one
         analyze (bool): Analyze CSV output
+        extraction_method (str): Extraction method to use ('regular', 'lattice', 'strict_lattice', 'camelot')
         
     Returns:
         bool: Success status
@@ -247,7 +296,7 @@ def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combin
         # Process sequentially for debugging
         for pdf in pdf_files:
             logger.info(f"Processing {pdf} (debug mode)")
-            success, output_file = process_single_pdf(pdf, output_dir, debug)
+            success, output_file = process_single_pdf(pdf, output_dir, debug, extraction_method)
             if success:
                 successful += 1
                 if output_file:
@@ -257,7 +306,7 @@ def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combin
     else:
         # Process in parallel for production
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_pdf = {executor.submit(process_single_pdf, pdf, output_dir, debug): pdf for pdf in pdf_files}
+            future_to_pdf = {executor.submit(process_single_pdf, pdf, output_dir, debug, extraction_method): pdf for pdf in pdf_files}
             for future in concurrent.futures.as_completed(future_to_pdf):
                 pdf = future_to_pdf[future]
                 try:
@@ -349,14 +398,35 @@ def menu_extract_single_pdf():
     """Menu for extracting transactions from a single PDF"""
     print_section_header("EXTRACT TRANSACTIONS FROM SINGLE PDF")
     
+    # Get PDF path
     pdf_path = get_input_path("Enter path to PDF file: ", 'file')
-    output_dir = get_input_path("Enter output directory (or press Enter for current directory): ") or os.getcwd()
     
-    debug = input("Enable debug mode? (y/n): ").lower() == 'y'
+    # Get output directory
+    output_dir = get_input_path("Enter output directory for results: ", 'dir')
+    
+    # Get extraction method
+    print("\nSelect extraction method:")
+    print("1. Regular (Default)")
+    print("2. Lattice")
+    print("3. Strict Lattice")
+    print("4. Camelot (Recommended for single-column tables)")
+    
+    method_choice = input("Enter your choice (1-4, default: 1): ")
+    extraction_methods = {
+        '1': 'regular',
+        '2': 'lattice',
+        '3': 'strict_lattice',
+        '4': 'camelot'
+    }
+    extraction_method = extraction_methods.get(method_choice, 'regular')
+    
+    # Get debug option
+    debug = input("Enable debug mode? (y/n, default: n): ").lower() == 'y'
     analyze = input("Analyze CSV output? (y/n): ").lower() == 'y'
     
-    print("\nProcessing PDF file...")
-    success, output_file = process_single_pdf(pdf_path, output_dir, debug)
+    # Process PDF
+    print(f"\nProcessing PDF file using {extraction_method} extraction method...")
+    success, output_file = process_single_pdf(pdf_path, output_dir, debug, extraction_method)
     
     if success:
         print(f"\n✅ Successfully processed PDF: {pdf_path}")
@@ -386,13 +456,35 @@ def menu_batch_process():
     """Menu for batch processing multiple PDFs"""
     print_section_header("BATCH PROCESS MULTIPLE PDFs")
     
+    # Get input directory
     input_dir = get_input_path("Enter directory containing PDF files: ", 'dir')
-    output_dir = get_input_path("Enter output directory (or press Enter for current directory): ") or os.getcwd()
+    
+    # Get output directory
+    output_dir = get_input_path("Enter output directory for results: ", 'dir')
+    
+    # Get extraction method
+    print("\nSelect extraction method:")
+    print("1. Regular (Default)")
+    print("2. Lattice")
+    print("3. Strict Lattice")
+    print("4. Camelot (Recommended for single-column tables)")
+    
+    method_choice = input("Enter your choice (1-4, default: 1): ")
+    extraction_methods = {
+        '1': 'regular',
+        '2': 'lattice',
+        '3': 'strict_lattice',
+        '4': 'camelot'
+    }
+    extraction_method = extraction_methods.get(method_choice, 'regular')
     
     # Get processing options
-    debug = input("Enable debug mode? (y/n): ").lower() == 'y'
-    combine = input("Combine all CSV files into one? (y/n): ").lower() == 'y'
-    analyze = input("Analyze CSV output? (y/n): ").lower() == 'y'
+    max_workers = input("Enter maximum number of worker processes (default: 4): ")
+    max_workers = int(max_workers) if max_workers.isdigit() else 4
+    
+    debug = input("Enable debug mode? (y/n, default: n): ").lower() == 'y'
+    combine = input("Combine all CSVs into one file? (y/n, default: n): ").lower() == 'y'
+    analyze = input("Analyze CSV output after processing? (y/n, default: n): ").lower() == 'y'
     pattern = input("Filter PDFs by filename pattern (leave empty for all PDFs): ").strip()
     
     # Build command arguments
