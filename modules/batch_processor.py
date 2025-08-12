@@ -415,6 +415,9 @@ def main():
     parser.add_argument('--single', '-s', help='Process a single PDF file instead of a directory')
     parser.add_argument('--method', '-m', choices=['regular', 'lattice', 'strict_lattice', 'camelot'], 
                         default='regular', help='Extraction method to use')
+    parser.add_argument('--cashbook', action='store_true', help='Generate cashbook after processing')
+    parser.add_argument('--fiscal-start', default='2024-03-01', help='Start date of fiscal year (YYYY-MM-DD)')
+    parser.add_argument('--fiscal-end', default='2025-02-28', help='End date of fiscal year (YYYY-MM-DD)')
     
     args = parser.parse_args()
     
@@ -479,6 +482,44 @@ def main():
         
         if args.debug:
             print(f"Debug logs saved to: {os.path.join(args.output, 'debug')}")
+        
+        # Generate cashbook if requested and using camelot extraction method
+        if args.cashbook and args.method == 'camelot' and result['success_count'] > 0:
+            try:
+                print("\nGenerating cashbook and trial balance...")
+                
+                # Import the process_cashbook module
+                # Use relative import since we're in the modules directory
+                from modules.process_cashbook import process_cashbook
+                
+                # Determine input directory for cashbook (where CSV files are)
+                if args.method == 'camelot':
+                    csv_dir = os.path.join(args.output, 'camelot')
+                else:
+                    csv_dir = args.output
+                
+                # Set output path for cashbook
+                cashbook_path = os.path.join(args.output, f"Annual_Cashbook_{args.fiscal_start[:4]}-{args.fiscal_end[:4]}.xlsx")
+                
+                # Process the cashbook
+                cashbook_result = process_cashbook(
+                    csv_dir, 
+                    cashbook_path, 
+                    args.fiscal_start, 
+                    args.fiscal_end, 
+                    args.debug
+                )
+                
+                if cashbook_result['success']:
+                    print(f"\n✅ Cashbook generated successfully with {cashbook_result.get('transaction_count', 0)} transactions")
+                    print(f"Output file: {cashbook_result['output_path']}")
+                else:
+                    print(f"\n❌ Failed to generate cashbook: {cashbook_result.get('error', 'Unknown error')}")
+            except Exception as e:
+                print(f"\n❌ Error generating cashbook: {e}")
+                if args.debug:
+                    import traceback
+                    traceback.print_exc()
     
     logger.info("Batch processing finished")
     print(f"Log file: {log_file}")

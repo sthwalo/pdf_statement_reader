@@ -485,7 +485,20 @@ def menu_batch_process():
     debug = input("Enable debug mode? (y/n, default: n): ").lower() == 'y'
     combine = input("Combine all CSVs into one file? (y/n, default: n): ").lower() == 'y'
     analyze = input("Analyze CSV output after processing? (y/n, default: n): ").lower() == 'y'
+    
+    # Add cashbook option (only available for camelot extraction)
+    cashbook = False
+    if extraction_method == 'camelot':
+        cashbook = input("Generate cashbook after processing? (y/n, default: n): ").lower() == 'y'
+        
     pattern = input("Filter PDFs by filename pattern (leave empty for all PDFs): ").strip()
+    
+    # Get fiscal year dates if cashbook is enabled
+    fiscal_start = '2024-03-01'
+    fiscal_end = '2025-02-28'
+    if cashbook:
+        fiscal_start = input(f"Enter start date of fiscal year (YYYY-MM-DD, default: {fiscal_start}): ").strip() or fiscal_start
+        fiscal_end = input(f"Enter end date of fiscal year (YYYY-MM-DD, default: {fiscal_end}): ").strip() or fiscal_end
     
     # Build command arguments
     batch_script_path = os.path.join(os.path.dirname(__file__), '../modules/batch_processor.py')
@@ -500,6 +513,10 @@ def menu_batch_process():
         cmd.append('--combine')
     if analyze:
         cmd.append('--analyze')
+    if cashbook:
+        cmd.append('--cashbook')
+        cmd.extend(['--fiscal-start', fiscal_start])
+        cmd.extend(['--fiscal-end', fiscal_end])
     if pattern:
         cmd.extend(['--pattern', pattern])
     
@@ -711,18 +728,120 @@ def display_menu():
     print("\n1. Extract Transactions from Single PDF")
     print("2. Batch Process Multiple PDFs")
     print("3. Analyze CSV Files")
-    print("4. Analyze PDF Structure")
-    print("5. Correlate Extraction Issues")
-    print("6. Page Analyzer (Compare Pages)")
-    print("7. Settings")
+    print("4. Generate Cashbook & Trial Balance")
+    print("5. Analyze PDF Structure")
+    print("6. Correlate Extraction Issues")
+    print("7. Page Analyzer (Compare Pages)")
+    print("8. Settings")
     print("0. Exit")
+
+def menu_process_cashbook():
+    """Menu for generating cashbook and trial balance"""
+    print_section_header("Generate Cashbook and Trial Balance")
+    
+    # Get input directory
+    input_dir = get_input_path("Enter directory containing CSV files: ", file_type='dir')
+    
+    # Get output path
+    default_output = os.path.join(os.path.dirname(input_dir), "cashbook.xlsx")
+    output_path = input(f"Enter output Excel file path (default: {default_output}): ").strip() or default_output
+    
+    # Get fiscal year date range
+    default_start = '2024-03-01'
+    default_end = '2025-02-28'
+    
+    start_date = input(f"Enter start date of fiscal year (YYYY-MM-DD, default: {default_start}): ").strip() or default_start
+    end_date = input(f"Enter end date of fiscal year (YYYY-MM-DD, default: {default_end}): ").strip() or default_end
+    
+    # Balance verification options
+    print("\nBalance Verification Options:")
+    print("1. Generate cashbook without balance verification")
+    print("2. Verify balances against expected values (without forcing adjustments)")
+    
+    balance_option = input("\nSelect option (1-2, default: 1): ").strip() or "1"
+    
+    expected_opening_balance = None
+    expected_closing_balance = None
+    
+    if balance_option == "2":
+        print("\nEnter expected balance values from bank statements for verification:")
+        try:
+            expected_opening_balance = float(input("Expected opening balance at start of fiscal year: ").strip().replace(',', ''))
+            expected_closing_balance = float(input("Expected closing balance at end of fiscal year: ").strip().replace(',', ''))
+            print(f"\nWill verify balances against: Opening={expected_opening_balance}, Closing={expected_closing_balance}")
+            print("Note: Transactions will be properly sorted and balances calculated naturally.")
+            print("      Any differences between calculated and expected balances will be reported.")
+        except ValueError:
+            print("\nInvalid balance values entered. Will proceed without balance verification.")
+            expected_opening_balance = None
+            expected_closing_balance = None
+    
+    # Debug mode
+    debug = input("\nEnable debug mode? (y/n, default: n): ").lower() == 'y'
+    
+    print("\nProcessing cashbook...")
+    
+    try:
+        # Import the process_cashbook module
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+        from modules.process_cashbook import process_cashbook
+        
+        # Process the cashbook
+        result = process_cashbook(
+            input_dir, 
+            output_path, 
+            start_date, 
+            end_date, 
+            debug=debug,
+            expected_opening_balance=expected_opening_balance,
+            expected_closing_balance=expected_closing_balance
+        )
+        
+        if result['success']:
+            print(f"\n✅ Cashbook generated successfully with {result.get('transaction_count', 0)} transactions")
+            print(f"Output file: {result['output_path']}")
+            
+            if expected_opening_balance is not None and expected_closing_balance is not None:
+                print("\nBalance Verification Results:")
+                opening_balance = result.get('opening_balance')
+                closing_balance = result.get('closing_balance')
+                opening_diff = result.get('opening_balance_difference')
+                closing_diff = result.get('closing_balance_difference')
+                
+                print(f"Actual opening balance: {opening_balance:.2f}")
+                print(f"Expected opening balance: {expected_opening_balance:.2f}")
+                if opening_diff is not None:
+                    print(f"Opening balance difference: {opening_diff:.2f}")
+                    if abs(opening_diff) < 0.01:
+                        print("✓ Opening balance matches expected value")
+                    else:
+                        print("⚠ Opening balance differs from expected value")
+                
+                print(f"\nActual closing balance: {closing_balance:.2f}")
+                print(f"Expected closing balance: {expected_closing_balance:.2f}")
+                if closing_diff is not None:
+                    print(f"Closing balance difference: {closing_diff:.2f}")
+                    if abs(closing_diff) < 0.01:
+                        print("✓ Closing balance matches expected value")
+                    else:
+                        print("⚠ Closing balance differs from expected value")
+                        print("Note: No adjustment was made as requested. Transactions were properly sorted and balances calculated naturally.")
+        else:
+            print(f"\n❌ Failed to generate cashbook: {result.get('error', 'Unknown error')}")
+    except Exception as e:
+        print(f"\n❌ Error processing cashbook: {e}")
+        if debug:
+            import traceback
+            traceback.print_exc()
+    
+    input("\nPress Enter to return to main menu...")
 
 def main_menu():
     """Display main menu and handle user choices"""
     while True:
         display_menu()
         
-        choice = input("\nEnter your choice (0-7): ")
+        choice = input("\nEnter your choice (0-8): ")
         
         if choice == '1':
             menu_extract_single_pdf()
@@ -731,12 +850,14 @@ def main_menu():
         elif choice == '3':
             menu_analyze_csv()
         elif choice == '4':
-            menu_analyze_pdf_structure()
+            menu_process_cashbook()
         elif choice == '5':
-            menu_correlate_issues()
+            menu_analyze_pdf_structure()
         elif choice == '6':
-            menu_page_analyzer()
+            menu_correlate_issues()
         elif choice == '7':
+            menu_page_analyzer()
+        elif choice == '8':
             menu_settings()
         elif choice == '0':
             print("\nExiting PDF Statement Processor. Goodbye!")
