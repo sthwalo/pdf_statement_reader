@@ -353,18 +353,14 @@ def process_directory(input_dir, output_dir, password=None, max_workers=None, co
         is_camelot_extraction = extraction_method == 'camelot'
         
         # Set appropriate output directory for combined file
+        # Always use data/output/camelot for camelot extraction to ensure consistency
         if is_camelot_extraction:
-            # For camelot, use the same directory as the individual files
-            # Get the directory of the first successful output file
-            if successful_outputs and len(successful_outputs) > 0:
-                first_output = successful_outputs[0]
-                camelot_output_dir = os.path.dirname(first_output)
-                combined_path = os.path.join(camelot_output_dir, "combined_transactions.csv")
-            else:
-                # Fallback to data/output/camelot
-                camelot_output_dir = os.path.join('data', 'output', 'camelot')
-                os.makedirs(camelot_output_dir, exist_ok=True)
-                combined_path = os.path.join(camelot_output_dir, "combined_transactions.csv")
+            # Use data/output/camelot directory for consistency
+            data_output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'output')
+            camelot_output_dir = os.path.join(data_output_dir, 'camelot')
+            os.makedirs(camelot_output_dir, exist_ok=True)
+            combined_path = os.path.join(camelot_output_dir, "combined_transactions.csv")
+            logger.info(f"Using standard path for combined CSV: {combined_path}")
         else:
             # For other methods, use the specified output directory
             combined_path = os.path.join(output_dir, "combined_transactions.csv")
@@ -416,6 +412,7 @@ def main():
     parser.add_argument('--method', '-m', choices=['regular', 'lattice', 'strict_lattice', 'camelot'], 
                         default='regular', help='Extraction method to use')
     parser.add_argument('--cashbook', action='store_true', help='Generate cashbook after processing')
+    parser.add_argument('--analyze', '-a', action='store_true', help='Analyze CSV output after processing')
     parser.add_argument('--fiscal-start', default='2024-03-01', help='Start date of fiscal year (YYYY-MM-DD)')
     parser.add_argument('--fiscal-end', default='2025-02-28', help='End date of fiscal year (YYYY-MM-DD)')
     
@@ -493,8 +490,18 @@ def main():
                 from modules.process_cashbook import process_cashbook
                 
                 # Determine input directory for cashbook (where CSV files are)
-                if args.method == 'camelot':
+                # Check if the combined CSV exists in data/output/camelot first
+                data_output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'output')
+                data_camelot_dir = os.path.join(data_output_dir, 'camelot')
+                
+                if args.method == 'camelot' and os.path.exists(data_camelot_dir) and os.path.exists(os.path.join(data_camelot_dir, 'combined_transactions.csv')):
+                    csv_dir = data_camelot_dir
+                    logger.info(f"Using existing combined CSV from {csv_dir}")
+                elif args.method == 'camelot':
                     csv_dir = os.path.join(args.output, 'camelot')
+                    if not os.path.exists(csv_dir):
+                        os.makedirs(csv_dir, exist_ok=True)
+                        logger.warning(f"Created missing directory: {csv_dir}")
                 else:
                     csv_dir = args.output
                 
@@ -507,7 +514,9 @@ def main():
                     cashbook_path, 
                     args.fiscal_start, 
                     args.fiscal_end, 
-                    args.debug
+                    use_existing_combined=True,  # Always use existing combined CSV if available
+                    expected_opening_balance=None,  # No expected balance for batch processing
+                    expected_closing_balance=None   # No expected balance for batch processing
                 )
                 
                 if cashbook_result['success']:
@@ -517,6 +526,56 @@ def main():
                     print(f"\n❌ Failed to generate cashbook: {cashbook_result.get('error', 'Unknown error')}")
             except Exception as e:
                 print(f"\n❌ Error generating cashbook: {e}")
+                if args.debug:
+                    import traceback
+                    traceback.print_exc()
+        
+        # Analyze CSV output if requested
+        if args.analyze and result['success_count'] > 0:
+            try:
+                print("\nAnalyzing CSV output...")
+                
+                # Import the analyze_transactions module
+                sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+                from modules.analyze_transactions import analyze_csv_directory
+                
+                # Determine input directory for analysis (where CSV files are)
+                # Check if the combined CSV exists in data/output/camelot first
+                data_output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'output')
+                data_camelot_dir = os.path.join(data_output_dir, 'camelot')
+                
+                if args.method == 'camelot' and os.path.exists(data_camelot_dir) and os.path.exists(os.path.join(data_camelot_dir, 'combined_transactions.csv')):
+                    csv_dir = data_camelot_dir
+                    logger.info(f"Using existing combined CSV from {csv_dir} for analysis")
+                elif args.method == 'camelot':
+                    csv_dir = os.path.join(args.output, 'camelot')
+                    if not os.path.exists(csv_dir):
+                        logger.warning(f"Directory not found: {csv_dir}")
+                        # Try the output directory directly
+                        csv_dir = args.output
+                else:
+                    csv_dir = args.output
+                
+                # Set output path for analysis report
+                analysis_path = os.path.join(args.output, f"Transaction_Analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                
+                # Analyze the CSV files
+                with open(analysis_path, 'w') as f:
+                    # Redirect stdout to the file
+                    original_stdout = sys.stdout
+                    sys.stdout = f
+                    
+                    # Run analysis
+                    analyze_csv_directory(csv_dir)
+                    
+                    # Restore stdout
+                    sys.stdout = original_stdout
+                
+                print(f"\n✅ CSV analysis complete")
+                print(f"Analysis report saved to: {analysis_path}")
+                
+            except Exception as e:
+                print(f"\n❌ Error analyzing CSV output: {e}")
                 if args.debug:
                     import traceback
                     traceback.print_exc()

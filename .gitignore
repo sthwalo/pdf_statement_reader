@@ -109,6 +109,9 @@ venv.bak/
 *.csv
 *.json
 *.ipynb
+*.xlsx
+*.md
+*.log
 
 !pdf_statement_reader/config/**/*.json
 

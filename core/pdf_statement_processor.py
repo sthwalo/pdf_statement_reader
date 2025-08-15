@@ -792,7 +792,7 @@ def menu_process_cashbook():
             output_path, 
             start_date, 
             end_date, 
-            debug=debug,
+            use_existing_combined=True,  # Always use existing combined CSV if available
             expected_opening_balance=expected_opening_balance,
             expected_closing_balance=expected_closing_balance
         )
