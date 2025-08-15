@@ -49,6 +49,8 @@ def preprocess_dataframe(df):
     
     # Convert date strings to datetime objects
     if 'Date' in df.columns:
+        # Store original date strings before conversion
+        df['Original_Date'] = df['Date'].copy()
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     
     # Convert numeric columns
@@ -284,12 +286,20 @@ def fix_balance_issues(csv_path, output_path=None, debug=False):
         base_name = os.path.splitext(csv_path)[0]
         output_path = f"{base_name}_fixed.csv"
     
-    # Remove debug columns if not in debug mode
-    if not debug:
-        cols_to_drop = ['Calculated_Balance', 'Balance_Discrepancy', 'Balance_Fixed', 'Recalculated_Balance']
-        for col in cols_to_drop:
-            if col in fixed_df.columns:
-                fixed_df = fixed_df.drop(columns=[col])
+    # Always remove debug columns from the output CSV
+    # Keep a copy with debug columns for debug info if needed
+    debug_df = fixed_df.copy()
+    
+    # Remove debug columns from the output CSV
+    cols_to_drop = ['Calculated_Balance', 'Balance_Discrepancy', 'Balance_Fixed', 'Recalculated_Balance']
+    for col in cols_to_drop:
+        if col in fixed_df.columns:
+            fixed_df = fixed_df.drop(columns=[col])
+            
+    # Restore original date format if available
+    if 'Original_Date' in fixed_df.columns:
+        fixed_df['Date'] = fixed_df['Original_Date']
+        fixed_df = fixed_df.drop(columns=['Original_Date'])
     
     fixed_df.to_csv(output_path, index=False)
     logger.info(f"Saved fixed CSV to {output_path}")

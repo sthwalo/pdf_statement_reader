@@ -110,7 +110,7 @@ venv.bak/
 *.json
 *.ipynb
 *.xlsx
-*.md
+#*.md
 *.log
 
 !pdf_statement_reader/config/**/*.json
@@ -125,4 +125,4 @@ data/
 /backup/*
 backup.zip
 output/
-
+docs/

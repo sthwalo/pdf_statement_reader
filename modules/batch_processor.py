@@ -18,6 +18,9 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 # Import transaction extraction functions
 from modules.transaction_extractor import extract_transactions_from_pdf
 from modules.csv_exporter import save_to_csv, combine_csv_files
@@ -52,7 +55,7 @@ def process_single_pdf(pdf_path, output_dir, password=None, debug=False, extract
     
     # Import camelot parser if needed
     if extraction_method == 'camelot':
-        from camelot_parser import CamelotBankStatementParser
+        from modules.camelot_parser import CamelotBankStatementParser
     
     result = {
         'pdf_path': pdf_path,
@@ -85,7 +88,7 @@ def process_single_pdf(pdf_path, output_dir, password=None, debug=False, extract
         
         # Use camelot parser if selected
         if extraction_method == 'camelot':
-            logger.info(f"Using camelot parser for {pdf_path}")
+            logger.info(f"Using camelot extraction method for {pdf_path}")
             parser = CamelotBankStatementParser(debug=debug)
             if debug:
                 transactions = parser.extract_transactions_from_pdf(pdf_path, password=password)
@@ -485,9 +488,9 @@ def main():
             try:
                 print("\nGenerating cashbook and trial balance...")
                 
-                # Import the process_cashbook module
+                # Import the simple_cashbook module
                 # Use relative import since we're in the modules directory
-                from modules.process_cashbook import process_cashbook
+                from modules.simple_cashbook import process_simple_cashbook
                 
                 # Determine input directory for cashbook (where CSV files are)
                 # Check if the combined CSV exists in data/output/camelot first
@@ -508,15 +511,26 @@ def main():
                 # Set output path for cashbook
                 cashbook_path = os.path.join(args.output, f"Annual_Cashbook_{args.fiscal_start[:4]}-{args.fiscal_end[:4]}.xlsx")
                 
+                # Check for fixed CSV file first, then regular combined CSV
+                fixed_csv_path = os.path.join(csv_dir, "combined_transactions_fixed.csv")
+                regular_csv_path = os.path.join(csv_dir, "combined_transactions.csv")
+                
+                # Use the fixed CSV if it exists, otherwise use the regular combined CSV
+                if os.path.exists(fixed_csv_path):
+                    combined_csv_path = fixed_csv_path
+                    logger.info(f"Using fixed CSV file for cashbook: {fixed_csv_path}")
+                elif os.path.exists(regular_csv_path):
+                    combined_csv_path = regular_csv_path
+                    logger.info(f"Using regular combined CSV file for cashbook: {regular_csv_path}")
+                else:
+                    raise FileNotFoundError(f"No combined CSV file found in {csv_dir}")
+                
                 # Process the cashbook
-                cashbook_result = process_cashbook(
-                    csv_dir, 
-                    cashbook_path, 
-                    args.fiscal_start, 
-                    args.fiscal_end, 
-                    use_existing_combined=True,  # Always use existing combined CSV if available
-                    expected_opening_balance=None,  # No expected balance for batch processing
-                    expected_closing_balance=None   # No expected balance for batch processing
+                cashbook_result = process_simple_cashbook(
+                    input_csv=combined_csv_path, 
+                    output_file=cashbook_path, 
+                    fiscal_start_month=int(args.fiscal_start[5:7]),
+                    fiscal_start_day=int(args.fiscal_start[8:10])
                 )
                 
                 if cashbook_result['success']:

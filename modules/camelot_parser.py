@@ -440,8 +440,47 @@ class CamelotBankStatementParser:
             
         return transactions
     
+    def _extract_header_info(self, pdf_path: str) -> dict:
+        """Extract header information from the first page of the PDF"""
+        import PyPDF2
+        import re
+        
+        header_info = {
+            'accountnumber': '',
+            'statementperiod': ''
+        }
+        
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                first_page = reader.pages[0]
+                text = first_page.extract_text()
+                
+                # Extract account number
+                account_match = re.search(r'Account\s+Number\s*\n?\s*(\d+\s*\d+\s*\d+\s*\d+)', text, re.IGNORECASE)
+                if account_match:
+                    # Remove spaces from account number
+                    header_info['accountnumber'] = account_match.group(1).replace(' ', '')
+                
+                # Extract statement period
+                period_match = re.search(r'Statement\s+from\s+(\d+\s+\w+\s+\d{4})\s+to\s+(\d+\s+\w+\s+\d{4})', text, re.IGNORECASE)
+                if period_match:
+                    header_info['statementperiod'] = f"{period_match.group(1)} - {period_match.group(2)}"
+                    
+                if self.debug:
+                    logger.debug(f"Extracted header info: {header_info}")
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting header info: {e}")
+            
+        return header_info
+        
     def extract_transactions_from_pdf(self, pdf_path: str, password: Optional[str] = None) -> List[Dict]:
         """Extract transactions from all tables in a PDF"""
+
+        # Extract header information first
+        header_info = self._extract_header_info(pdf_path)
+
         # Extract tables from PDF
         tables = self.extract_tables_from_pdf(pdf_path, password)
         
@@ -476,6 +515,10 @@ class CamelotBankStatementParser:
         
         # Post-process transactions
         if all_transactions:
+            # Add header info to each transaction before post-processing
+            for tx in all_transactions:
+                tx.update(header_info)
+                
             all_transactions = self.post_process_transactions(all_transactions)
         
         self.debug_info['total_transactions'] = len(all_transactions)
@@ -505,6 +548,12 @@ class CamelotBankStatementParser:
                 'Balance': normalized_tx.get('balance', 0),
                 'ServiceFee': normalized_tx.get('servicefee', '')
             }
+            
+            # Add header info if available
+            if normalized_tx.get('accountnumber'):
+                clean_tx['AccountNumber'] = normalized_tx.get('accountnumber')
+            if normalized_tx.get('statementperiod'):
+                clean_tx['StatementPeriod'] = normalized_tx.get('statementperiod')
             
             clean_transactions.append(clean_tx)
         
@@ -670,5 +719,174 @@ def main():
         logger.error("❌ Failed to extract any transactions")
 
 
+def combine_statement_csvs(csv_files: List[str], output_file: str, fiscal_year_sorting: bool = False, fiscal_start_month: int = 3, fiscal_start_day: int = 1) -> None:
+    """Combine multiple statement CSV files in chronological order
+    
+    Args:
+        csv_files: List of CSV files to combine
+        output_file: Output CSV file
+        fiscal_year_sorting: If True, sort by fiscal year instead of calendar year
+        fiscal_start_month: Month when fiscal year starts (1-12)
+        fiscal_start_day: Day when fiscal year starts (1-31)
+    """
+    import pandas as pd
+    import re
+    from datetime import datetime
+    
+    all_dfs = []
+    file_dates = []
+    
+    # First pass: Read all CSVs and extract their statement periods
+    for file_path in csv_files:
+        try:
+            # Read the CSV
+            df = pd.read_csv(file_path)
+            
+            if df.empty:
+                logger.warning(f"Empty CSV file: {file_path}")
+                continue
+                
+            # Check if the CSV has the required columns
+            if 'StatementPeriod' not in df.columns:
+                logger.warning(f"CSV file missing StatementPeriod column: {file_path}")
+                continue
+                
+            # Extract the start date from the statement period
+            # Format example: "16 February 2024 - 16 March 2024"
+            statement_period = df['StatementPeriod'].iloc[0]
+            
+            # Extract start date using regex
+            start_date_match = re.search(r'(\d+\s+\w+\s+\d{4})', statement_period)
+            if not start_date_match:
+                logger.warning(f"Could not extract date from statement period: {statement_period}")
+                continue
+                
+            start_date_str = start_date_match.group(1)
+            
+            try:
+                # Parse the date
+                start_date = datetime.strptime(start_date_str, '%d %B %Y')
+                
+                # Store the dataframe and its start date
+                all_dfs.append(df)
+                file_dates.append(start_date)
+                logger.info(f"Added {len(df)} transactions from {file_path} with period starting {start_date_str}")
+                
+            except ValueError as e:
+                logger.warning(f"Error parsing date '{start_date_str}': {e}")
+                continue
+                
+        except Exception as e:
+            logger.error(f"Error processing file {file_path}: {e}")
+    
+    if not all_dfs:
+        logger.error("No valid CSV files found to combine")
+        return
+    
+    # Sort dataframes by their statement period start dates
+    sorted_dfs = [df for _, df in sorted(zip(file_dates, all_dfs))]
+    
+    # Combine all dataframes
+    combined_df = pd.concat(sorted_dfs, ignore_index=True)
+    
+    # Sort transactions by date within each statement period
+    # First convert Date column to datetime if possible
+    try:
+        # Try different date formats
+        date_formats = ['%d/%m', '%d/%m/%Y', '%Y-%m-%d']
+        converted = False
+        
+        for date_format in date_formats:
+            try:
+                # Add a dummy year if the format doesn't include year
+                if date_format == '%d/%m':
+                    # Extract year from StatementPeriod
+                    combined_df['TempYear'] = combined_df['StatementPeriod'].str.extract(r'(\d{4})').iloc[:, 0]
+                    # Combine with Date
+                    combined_df['FullDate'] = combined_df.apply(
+                        lambda row: f"{row['Date']}/{row['TempYear']}" if pd.notna(row['Date']) else None, 
+                        axis=1
+                    )
+                    combined_df['DateObj'] = pd.to_datetime(combined_df['FullDate'], format='%d/%m/%Y', errors='coerce')
+                    combined_df.drop(['TempYear', 'FullDate'], axis=1, inplace=True)
+                else:
+                    combined_df['DateObj'] = pd.to_datetime(combined_df['Date'], format=date_format, errors='coerce')
+                    
+                if not combined_df['DateObj'].isna().all():
+                    converted = True
+                    break
+            except Exception as e:
+                logger.debug(f"Failed to parse dates with format {date_format}: {e}")
+        
+        # Add fiscal period based on transaction date if requested
+        if fiscal_year_sorting and converted:
+            # Create a function to determine fiscal year for each transaction
+            def get_fiscal_period(date_obj):
+                if pd.isna(date_obj):
+                    return None
+                    
+                # Get month and day from date
+                month = date_obj.month
+                day = date_obj.day
+                year = date_obj.year
+                
+                # If date is before fiscal year start, it belongs to previous fiscal year
+                if month < fiscal_start_month or (month == fiscal_start_month and day < fiscal_start_day):
+                    fiscal_year = year - 1
+                else:
+                    fiscal_year = year
+                    
+                fiscal_year_end = fiscal_year + 1
+                return f"FY{fiscal_year}-{fiscal_year_end}"
+            
+            # Apply fiscal period to each transaction
+            combined_df['FiscalPeriod'] = combined_df['DateObj'].apply(get_fiscal_period)
+            logger.info(f"Added fiscal periods to transactions based on individual transaction dates")
+            
+            # Sort by fiscal period, then by date
+            combined_df.sort_values(['FiscalPeriod', 'DateObj'], inplace=True)
+        elif converted:
+            # Just sort by date within statement period
+            combined_df.sort_values(['StatementPeriod', 'DateObj'], inplace=True)
+        else:
+            logger.warning("Could not convert dates to datetime for sorting, using original order")
+            
+        # Clean up temporary columns
+        if 'DateObj' in combined_df.columns:
+            combined_df.drop('DateObj', axis=1, inplace=True)
+            
+    except Exception as e:
+        logger.warning(f"Error processing dates: {e}")
+    
+    # Save combined CSV
+    combined_df.to_csv(output_file, index=False)
+    logger.info(f"✅ Combined {len(all_dfs)} CSV files with {len(combined_df)} total transactions")
+    logger.info(f"✅ Saved to: {output_file}")
+
+
 if __name__ == "__main__":
-    main()
+    # Check if the command is to combine CSVs
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "combine":
+        # Parse arguments for combine function
+        parser = argparse.ArgumentParser(description='Combine multiple statement CSV files')
+        parser.add_argument('--files', nargs='+', required=True, help='List of CSV files to combine')
+        parser.add_argument('--output', required=True, help='Output CSV file')
+        parser.add_argument('--fiscal-year', action='store_true', help='Sort by fiscal year instead of calendar year')
+        parser.add_argument('--fiscal-start-month', type=int, default=3, help='Month when fiscal year starts (1-12)')
+        parser.add_argument('--fiscal-start-day', type=int, default=1, help='Day when fiscal year starts (1-31)')
+        
+        # Parse only the relevant args
+        combine_args, _ = parser.parse_known_args(sys.argv[2:])
+        
+        # Combine CSV files
+        combine_statement_csvs(
+            combine_args.files, 
+            combine_args.output, 
+            fiscal_year_sorting=combine_args.fiscal_year,
+            fiscal_start_month=combine_args.fiscal_start_month,
+            fiscal_start_day=combine_args.fiscal_start_day
+        )
+    else:
+        # Run the normal main function
+        main()

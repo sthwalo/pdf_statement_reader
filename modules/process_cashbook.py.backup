@@ -1,5 +1,7 @@
-import pandas as pd
+#!/usr/bin/env python3
 import os
+import sys
+import pandas as pd
 import re
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -29,19 +31,76 @@ def parse_date(date_str, statement_month=None, statement_year=None):
         if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
             return pd.to_datetime(date_str)
             
-        # Handle DD/MM format
+        # Handle DD/MM/YYYY format
         if '/' in date_str:
             parts = date_str.split('/')
-            if len(parts) >= 2:
+            if len(parts) == 3:
+                # Full date with year is provided
                 day = parts[0].strip().zfill(2)
                 month = parts[1].strip().zfill(2)
-                return pd.to_datetime(f"{day}/{month}/{statement_year}", format='%d/%m/%Y')
+                year = parts[2].strip()
+                # Handle 2-digit year
+                if len(year) == 2:
+                    # Assume 20xx for years less than 50, 19xx for years 50 and above
+                    year = f"20{year}" if int(year) < 50 else f"19{year}"
+                return pd.to_datetime(f"{day}/{month}/{year}", format='%d/%m/%Y')
+            elif len(parts) >= 2:
+                # DD/MM format, need to infer year
+                day = parts[0].strip().zfill(2)
+                month = parts[1].strip().zfill(2)
+                month_num = int(month)
+                
+                # Handle fiscal year boundary
+                # If the statement is from March-Dec and the transaction is from Jan-Feb,
+                # the transaction is likely from the next calendar year
+                # If the statement is from Jan-Feb and the transaction is from Mar-Dec,
+                # the transaction is likely from the previous calendar year
+                inferred_year = statement_year
+                if statement_month and statement_year:
+                    if statement_month >= 3 and month_num < 3:
+                        # Statement is from Mar-Dec, but transaction is from Jan-Feb of next year
+                        inferred_year = statement_year + 1
+                    elif statement_month < 3 and month_num >= 3:
+                        # Statement is from Jan-Feb, but transaction is from Mar-Dec of previous year
+                        inferred_year = statement_year - 1
+                
+                return pd.to_datetime(f"{day}/{month}/{inferred_year}", format='%d/%m/%Y')
+        
+        # Handle DD-MM-YYYY format
+        if '-' in date_str:
+            parts = date_str.split('-')
+            if len(parts) == 3:
+                day = parts[0].strip().zfill(2)
+                month = parts[1].strip().zfill(2)
+                year = parts[2].strip()
+                if len(year) == 2:
+                    year = f"20{year}" if int(year) < 50 else f"19{year}"
+                return pd.to_datetime(f"{day}/{month}/{year}", format='%d/%m/%Y')
         
         # Handle just DD format (assuming same month as statement)
         if re.match(r'^\d{1,2}$', date_str):
             day = date_str.zfill(2)
             month = str(statement_month).zfill(2)
             return pd.to_datetime(f"{day}/{month}/{statement_year}", format='%d/%m/%Y')
+        
+        # Handle MM DD format (common in bank statements)
+        mm_dd_match = re.match(r'^\s*(\d{1,2})\s+(\d{1,2})\s*$', date_str)
+        if mm_dd_match:
+            month_num = int(mm_dd_match.group(1))
+            day = mm_dd_match.group(2).zfill(2)
+            month = str(month_num).zfill(2)
+            
+            # Handle fiscal year boundary
+            inferred_year = statement_year
+            if statement_month and statement_year:
+                if statement_month >= 3 and month_num < 3:
+                    # Statement is from Mar-Dec, but transaction is from Jan-Feb of next year
+                    inferred_year = statement_year + 1
+                elif statement_month < 3 and month_num >= 3:
+                    # Statement is from Jan-Feb, but transaction is from Mar-Dec of previous year
+                    inferred_year = statement_year - 1
+            
+            return pd.to_datetime(f"{day}/{month}/{inferred_year}", format='%d/%m/%Y')
             
         # Default fallback
         return pd.NaT
@@ -122,7 +181,19 @@ def combine_csv_files(csv_files, output_path, expected_opening_balance=None, sta
             if month_match:
                 statement_month = int(month_match.group(1))
                 # Infer year based on fiscal year logic (March to February)
-                statement_year = 2023 if statement_month >= 3 else 2024
+                # Extract fiscal year from filename if possible
+                fiscal_year_match = re.search(r'FY(\d{4})', filename)
+                if fiscal_year_match:
+                    # If fiscal year is explicitly mentioned in filename (e.g., FY2024)
+                    fiscal_year = int(fiscal_year_match.group(1))
+                    # For fiscal year 2024, statements from Mar 2023 to Feb 2024
+                    statement_year = fiscal_year - 1 if statement_month >= 3 else fiscal_year
+                else:
+                    # Default fiscal year logic - adjust based on your specific fiscal year
+                    # For statements from March to February, fiscal year spans two calendar years
+                    # This assumes current fiscal year is 2024 (Mar 2023 - Feb 2024)
+                    current_fiscal_year = 2024
+                    statement_year = current_fiscal_year - 1 if statement_month >= 3 else current_fiscal_year
                 df['statement_month'] = statement_month
                 df['statement_year'] = statement_year
                 
@@ -744,7 +815,7 @@ def generate_management_accounts(df):
     
     return income_statement, balance_sheet
 
-def generate_cashbook_excel(df, output_path):
+def generate_cashbook_excel(df, output_path, fiscal_year_sorting=False):
     """
     Generate an Excel cashbook from the processed DataFrame.
     
@@ -816,12 +887,46 @@ def generate_cashbook_excel(df, output_path):
                 df_excel['month'] = df_excel['date'].dt.month
                 df_excel['year'] = df_excel['date'].dt.year
                 
-                # Group by month and year
-                monthly_summary = df_excel.groupby(['year', 'month']).agg({
-                    'Debits': 'sum',
-                    'Credits': 'sum',
-                    'Balance': 'last'
-                }).reset_index()
+                # Add fiscal period if fiscal year sorting is enabled and not already present
+                if fiscal_year_sorting and 'FiscalPeriod' not in df_excel.columns:
+                    # Create a function to determine fiscal year for each transaction
+                    def get_fiscal_period(date_obj):
+                        if pd.isna(date_obj):
+                            return None
+                            
+                        # Get month and day from date
+                        month = date_obj.month
+                        day = date_obj.day
+                        year = date_obj.year
+                        
+                        # If date is before fiscal year start, it belongs to previous fiscal year
+                        if month < 3 or (month == 3 and day < 1):  # Default fiscal year starts March 1
+                            fiscal_year = year - 1
+                        else:
+                            fiscal_year = year
+                            
+                        fiscal_year_end = fiscal_year + 1
+                        return f"FY{fiscal_year}-{fiscal_year_end}"
+                    
+                    # Apply fiscal period to each transaction
+                    df_excel['FiscalPeriod'] = df_excel['date'].apply(get_fiscal_period)
+                    print("Added fiscal periods to transactions based on individual transaction dates")
+                
+                # Group by fiscal period (if available), then by month and year
+                if fiscal_year_sorting and 'FiscalPeriod' in df_excel.columns:
+                    print("Grouping by fiscal period, year, and month...")
+                    monthly_summary = df_excel.groupby(['FiscalPeriod', 'year', 'month']).agg({
+                        'Debits': 'sum',
+                        'Credits': 'sum',
+                        'Balance': 'last'
+                    }).reset_index()
+                else:
+                    # Group by month and year
+                    monthly_summary = df_excel.groupby(['year', 'month']).agg({
+                        'Debits': 'sum',
+                        'Credits': 'sum',
+                        'Balance': 'last'
+                    }).reset_index()
                 
                 # Add month name
                 month_names = {
@@ -835,18 +940,33 @@ def generate_cashbook_excel(df, output_path):
                 monthly_summary['Net'] = monthly_summary['Credits'] - monthly_summary['Debits']
                 
                 # Reorder columns
-                monthly_summary = monthly_summary[['year', 'month', 'Month', 'Debits', 'Credits', 'Net', 'Balance']]
+                if fiscal_year_sorting and 'FiscalPeriod' in monthly_summary.columns:
+                    monthly_summary = monthly_summary[['FiscalPeriod', 'year', 'month', 'Month', 'Debits', 'Credits', 'Net', 'Balance']]
+                else:
+                    monthly_summary = monthly_summary[['year', 'month', 'Month', 'Debits', 'Credits', 'Net', 'Balance']]
                 
                 # Add totals row
-                totals = pd.DataFrame({
-                    'year': ['Total'],
-                    'month': [''],
-                    'Month': [''],
-                    'Debits': [monthly_summary['Debits'].sum()],
-                    'Credits': [monthly_summary['Credits'].sum()],
-                    'Net': [monthly_summary['Credits'].sum() - monthly_summary['Debits'].sum()],
-                    'Balance': [monthly_summary['Balance'].iloc[-1] if len(monthly_summary) > 0 else 0]
-                })
+                if fiscal_year_sorting and 'FiscalPeriod' in monthly_summary.columns:
+                    totals = pd.DataFrame({
+                        'FiscalPeriod': ['Total'],
+                        'year': [''],
+                        'month': [''],
+                        'Month': [''],
+                        'Debits': [monthly_summary['Debits'].sum()],
+                        'Credits': [monthly_summary['Credits'].sum()],
+                        'Net': [monthly_summary['Credits'].sum() - monthly_summary['Debits'].sum()],
+                        'Balance': [monthly_summary['Balance'].iloc[-1] if len(monthly_summary) > 0 else 0]
+                    })
+                else:
+                    totals = pd.DataFrame({
+                        'year': ['Total'],
+                        'month': [''],
+                        'Month': [''],
+                        'Debits': [monthly_summary['Debits'].sum()],
+                        'Credits': [monthly_summary['Credits'].sum()],
+                        'Net': [monthly_summary['Credits'].sum() - monthly_summary['Debits'].sum()],
+                        'Balance': [monthly_summary['Balance'].iloc[-1] if len(monthly_summary) > 0 else 0]
+                    })
                 monthly_summary = pd.concat([monthly_summary, totals])
                 
                 # Write to Excel
@@ -1052,7 +1172,7 @@ def clean_and_process_csv(df, expected_opening_balance=None, expected_closing_ba
     
     return df, balance_info
 
-def process_cashbook(input_dir, output_file, start_date, end_date, use_existing_combined=False, expected_opening_balance=None, expected_closing_balance=None):
+def process_cashbook(input_dir, output_file, start_date, end_date, use_existing_combined=False, expected_opening_balance=None, expected_closing_balance=None, fiscal_year_sorting=False, fiscal_start_month=3, fiscal_start_day=1):
     """
     Process CSV files to generate a cashbook for the specified date range.
     
@@ -1064,6 +1184,9 @@ def process_cashbook(input_dir, output_file, start_date, end_date, use_existing_
         use_existing_combined (bool): Whether to use existing combined CSV file if available
         expected_opening_balance (float): Expected opening balance for verification
         expected_closing_balance (float): Expected closing balance for verification
+        fiscal_year_sorting (bool): If True, sort by fiscal year instead of calendar year
+        fiscal_start_month (int): Month when fiscal year starts (1-12)
+        fiscal_start_day (int): Day when fiscal year starts (1-31)
         
     Returns:
         dict: Result with success status, output path, transaction count, and balance adjustment info
@@ -1095,8 +1218,24 @@ def process_cashbook(input_dir, output_file, start_date, end_date, use_existing_
             
             print(f"Found {len(csv_files)} CSV files")
             
-            # Combine CSV files
-            df = combine_csv_files(csv_files, combined_csv_path, expected_opening_balance, start_date, end_date)
+            # Import combine_csvs module for fiscal year support
+            from modules.combine_csvs import combine_csv_files as combine_fiscal_csvs
+            
+            # Combine CSV files with fiscal year parameters
+            combined_success = combine_fiscal_csvs(
+                input_dir, 
+                combined_csv_path, 
+                fiscal_year_sorting=fiscal_year_sorting,
+                fiscal_start_month=fiscal_start_month,
+                fiscal_start_day=fiscal_start_day
+            )
+            
+            if combined_success and os.path.exists(combined_csv_path):
+                df = pd.read_csv(combined_csv_path)
+                print(f"Combined {len(csv_files)} CSV files into {combined_csv_path} with {len(df)} rows")
+            else:
+                print(f"Failed to combine CSV files")
+                return {"success": False, "output_path": None, "error": "Failed to combine CSV files", "transaction_count": 0}
             
             if df is None or df.empty:
                 print("No data found in CSV files")
@@ -1129,8 +1268,14 @@ def process_cashbook(input_dir, output_file, start_date, end_date, use_existing_
             max_date = df_filtered['date'].max()
             print(f"Processing transactions from {min_date} to {max_date}")
         
-        # Sort by date and statement_order if available
-        if 'date' in df_filtered.columns and 'statement_order' in df_filtered.columns:
+        # Sort by fiscal period (if available), date, and statement_order
+        if fiscal_year_sorting and 'FiscalPeriod' in df_filtered.columns and 'date' in df_filtered.columns:
+            print("Sorting by fiscal period and date...")
+            if 'statement_order' in df_filtered.columns:
+                df_filtered = df_filtered.sort_values(['FiscalPeriod', 'date', 'statement_order'])
+            else:
+                df_filtered = df_filtered.sort_values(['FiscalPeriod', 'date'])
+        elif 'date' in df_filtered.columns and 'statement_order' in df_filtered.columns:
             print("Sorting by date and statement_order...")
             df_filtered = df_filtered.sort_values(['date', 'statement_order'])
         elif 'date' in df_filtered.columns:
@@ -1206,8 +1351,8 @@ def process_cashbook(input_dir, output_file, start_date, end_date, use_existing_
                     import traceback
                     traceback.print_exc()
             
-            # Generate Excel cashbook
-            excel_result = generate_cashbook_excel(df_filtered, output_file)
+            # Generate Excel cashbook with fiscal year parameters
+            excel_result = generate_cashbook_excel(df_filtered, output_file, fiscal_year_sorting=fiscal_year_sorting)
             
             if excel_result:
                 print(f"Successfully generated Excel cashbook at {output_file}")
@@ -1262,6 +1407,12 @@ def main():
     parser.add_argument('--start-date', default='2024-03-01', help='Start date of fiscal year (YYYY-MM-DD)')
     parser.add_argument('--end-date', default='2025-02-28', help='End date of fiscal year (YYYY-MM-DD)')
     parser.add_argument('--debug', action='store_true', help='Print debug information')
+    parser.add_argument('--fiscal-year', action='store_true', help='Sort by fiscal year instead of calendar year')
+    parser.add_argument('--fiscal-start-month', type=int, default=3, help='Month when fiscal year starts (1-12)')
+    parser.add_argument('--fiscal-start-day', type=int, default=1, help='Day when fiscal year starts (1-31)')
+    parser.add_argument('--use-existing-combined', action='store_true', help='Use existing combined CSV file if available')
+    parser.add_argument('--expected-opening-balance', type=float, help='Expected opening balance for verification')
+    parser.add_argument('--expected-closing-balance', type=float, help='Expected closing balance for verification')
     
     args = parser.parse_args()
     
@@ -1270,7 +1421,12 @@ def main():
         args.output,
         args.start_date,
         args.end_date,
-        args.debug
+        args.use_existing_combined,
+        args.expected_opening_balance,
+        args.expected_closing_balance,
+        args.fiscal_year,
+        args.fiscal_start_month,
+        args.fiscal_start_day
     )
     
     if result['success']:

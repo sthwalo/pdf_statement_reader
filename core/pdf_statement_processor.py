@@ -33,7 +33,7 @@ from modules.csv_exporter import save_to_csv, combine_csv_files
 from modules.csv_analyzer import analyze_csv_transactions, analyze_combined_csv
 from modules.analyze_pdf_structure import analyze_pdf_structure
 from modules.page_analyzer_menu import menu_analyze_pdf_pages
-from camelot_parser import CamelotBankStatementParser
+from modules.camelot_parser import CamelotBankStatementParser
 
 # Configure logging
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -257,7 +257,9 @@ def process_single_pdf(pdf_path, output_dir, debug=False, extraction_method='reg
         logger.error(f"Error processing {pdf_path}: {e}", exc_info=True)
         return False, None
 
-def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combine=False, analyze=False, extraction_method='regular'):
+def batch_process_pdfs(input_dir, output_dir, password=None, parser_type='camelot', 
+                   combine=False, analyze=False, debug=False, parallel=False, max_workers=None,
+                   fiscal_year_sorting=False, fiscal_start_month=3, fiscal_start_day=1):
     """
     Process all PDF files in the specified directory
     
@@ -330,13 +332,26 @@ def batch_process_pdfs(input_dir, output_dir, max_workers=4, debug=False, combin
         logger.info(f"Combining {len(output_files)} CSV files into {combined_csv}")
         
         if debug:
-            success, combine_debug = combine_csv_files(output_files, combined_csv, debug=True)
+            success, combine_debug = combine_csv_files(
+                output_files, 
+                combined_csv, 
+                fiscal_year_sorting=fiscal_year_sorting,
+                fiscal_start_month=fiscal_start_month,
+                fiscal_start_day=fiscal_start_day,
+                debug=True
+            )
             debug_dir = os.path.join(output_dir, "debug")
             os.makedirs(debug_dir, exist_ok=True)
             with open(os.path.join(debug_dir, "combine_csv_debug.json"), 'w') as f:
                 json.dump(combine_debug, f, indent=2, default=str)
         else:
-            success = combine_csv_files(output_files, combined_csv)
+            success = combine_csv_files(
+                output_files, 
+                combined_csv,
+                fiscal_year_sorting=fiscal_year_sorting,
+                fiscal_start_month=fiscal_start_month,
+                fiscal_start_day=fiscal_start_day
+            )
             
         if success:
             logger.info(f"Successfully combined CSV files into {combined_csv}")
@@ -782,19 +797,31 @@ def menu_process_cashbook():
     print("\nProcessing cashbook...")
     
     try:
-        # Import the process_cashbook module
+        # Import the simple_cashbook module
         sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-        from modules.process_cashbook import process_cashbook
+        from modules.simple_cashbook import process_simple_cashbook
+        
+        # Check if we have a fixed CSV file first
+        fixed_csv_path = os.path.join(input_dir, 'combined_transactions_fixed.csv')
+        regular_csv_path = os.path.join(input_dir, 'combined_transactions.csv')
+        
+        # Use the fixed CSV if it exists, otherwise use the regular combined CSV
+        if os.path.exists(fixed_csv_path):
+            input_csv_path = fixed_csv_path
+            print(f"Using fixed CSV file: {fixed_csv_path}")
+        elif os.path.exists(regular_csv_path):
+            input_csv_path = regular_csv_path
+            print(f"Using combined CSV file: {regular_csv_path}")
+        else:
+            print(f"Error: No combined CSV file found in {input_dir}")
+            return False
         
         # Process the cashbook
-        result = process_cashbook(
-            input_dir, 
-            output_path, 
-            start_date, 
-            end_date, 
-            use_existing_combined=True,  # Always use existing combined CSV if available
-            expected_opening_balance=expected_opening_balance,
-            expected_closing_balance=expected_closing_balance
+        result = process_simple_cashbook(
+            input_csv=input_csv_path, 
+            output_file=output_path, 
+            fiscal_start_month=fiscal_start_month,
+            fiscal_start_day=fiscal_start_day
         )
         
         if result['success']:
@@ -872,6 +899,13 @@ def main():
     parser.add_argument('--output-dir', '-o', help='Output directory for results')
     parser.add_argument('--batch', '-b', help='Batch process PDFs in specified directory')
     parser.add_argument('--analyze', '-a', help='Analyze CSV file or directory')
+    parser.add_argument('--combine', action='store_true', help='Combine all CSV files into one')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--parallel', action='store_true', help='Process PDFs in parallel')
+    parser.add_argument('--max-workers', type=int, default=None, help='Maximum number of parallel workers')
+    parser.add_argument('--fiscal-year', action='store_true', help='Sort by fiscal year instead of calendar year')
+    parser.add_argument('--fiscal-start-month', type=int, default=3, help='Month when fiscal year starts (1-12)')
+    parser.add_argument('--fiscal-start-day', type=int, default=1, help='Day when fiscal year starts (1-31)')
     
     args = parser.parse_args()
     
@@ -882,8 +916,10 @@ def main():
     
     # Handle command line arguments for non-interactive mode
     if args.batch:
-        batch_process_pdfs(args.batch, output_dir, debug=False, combine=True, analyze=True)
-        return
+        batch_process_pdfs(args.batch, output_dir, combine=args.combine, analyze=args.analyze, 
+                          debug=args.debug, parallel=args.parallel, max_workers=args.max_workers,
+                          fiscal_year_sorting=args.fiscal_year, fiscal_start_month=args.fiscal_start_month,
+                          fiscal_start_day=args.fiscal_start_day)
     elif args.analyze:
         if os.path.isdir(args.analyze):
             for root, _, files in os.walk(args.analyze):
